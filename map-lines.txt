@@ -1,0 +1,148 @@
+Call FUNCTION for each line read from STREAM, using a shared buffer.
+
+MAP-LINES-ON-SHARED-BUFFER is intended to be used for parsing text line
+by line, when allocating a new string for each line as with READ-LINE is
+not desirable.
+
+The function accepts an input STREAM, a callback FUNCTION as well as
+additional keyword parameters.
+
+As far as MAP-LINES-ON-SHARED-BUFFER is concerned, FUNCTION must have
+type (FUNCTION (STRING &KEY STATUS &ALLOW-OTHER-KEYS) T); its returned
+values are not used and should accept one mandatory argument and at
+least the STATUS keyword argument:
+
+   1. The first parameter, of type string, is the current LINE; more
+   precisely, LINE is a displaced array that shows the content of the
+   current line inside BUFFER, according to SEPARATOR. The same
+   displaced array and the same buffer are used at each invocation of
+   FUNCTION (inside one call of MAP-LINES-ON-SHARED-BUFFER), which
+   means the content of LINE is only fixed during the duration of the
+   callback. You might need to copy the string if you need it stored
+   elsewhere.
+
+   2. The STATUS argument can be NIL, :PART or :TRUNCATED, depending
+   on how overflows are handled. Two outcomes are possible when an
+   overlong line is encounterd: (1) the line is :TRUNCATED, meaning
+   the next invocation of FUNCTION will contain the start of the next
+   line; all intermediate characters are discarded (2) the current
+   LINE contains only a :PART of the whole line: the next invocation
+   will contain the remaining characters, along with a status that can
+   also be :PART, :TRUNCATED or NIL (actual end of line). The case
+   where a :PART status is followed by a :TRUNCATED status is only
+   achievable by managing restarts explicitly, or when :PARTIALP is T.
+
+:SEPARATOR is the character that determines what constitutes an end of
+line, and defaults to #\Newline.
+
+:BUFFER, if non-nil, is the buffer being used to buffer the input. It
+should be an array of characters. If nil, an internal buffer is created
+that depends on BUFFER-SIZE and EXTENDP.
+
+:BUFFER-SIZE is used, when BUFFER is nil, to specify the size of the
+internal buffer.
+
+:MAX-LINE-SIZE & :EXTENDP - EXTENDP indicates whether the buffer being
+used (internal or external) should grow when a line is too long to fit
+the buffer. When T, the internal buffer is explicitly adjustable and
+may grow up to MAX-LINE-SIZE. When EXTENDP is T, the size doubles; if
+EXTENDP is a function, it is called with the previous size to
+determine the new size (if the function is not strictly increasing, an
+internal error signaled; the function result is clamped by
+MAX-LINE-SIZE).
+
+When the buffer size is extended over MAX-LINE-SIZE, or when EXTENDP is
+nil and the current line is overlong, there is an overflow.
+
+:ON-OVERFLOW indicates what to do in case of an overflow:
+
+- :TRUNCATE ignores all characters until the next SEPARATOR. In that
+  case the FUNCTION callback is given a second argument equal to
+  :TRUNCATE.
+
+- :SPLIT sends the content of the buffer to the callback along with a
+  the :PART status. The same line is then processed until the whole line
+  is sent, chunk by chunk, to the callback, until the end of line is
+  reached (or truncation).
+
+- :ERROR signals an error of type INTERNAL-BUFFER-OVERFLOW. If EXTENDP
+  is non-NIL, it is possible to invoke the EXTEND restart to try
+  adjusting the buffer (you must pass a positive AMOUNT argument),
+  which can even go beyond MAX-LINE-SIZE. Two other restarts are also
+  available, TRUNCATE and SPLIT, which correspond to the two above
+  behaviours.
+
+:PARTIALP indicates whether it is acceptable to have :PART lines
+outside of overflows. PARTIALP implies EXTENDP is treated as NIL. This
+is detailed below.
+
+IMPLEMENTATION DETAILS
+======================
+
+
+    
+             v line-start                   v line-end  
+             |                              |
+             ############ LINE #############|
+             |                              |
+BUFFER  [----x----o-------------------------x--------o--------------[
+                  |                                  |
+                  %%%%%%%%%%% READ-SEQUENCE %%%%%%%%%|
+                  |                                  |
+                  buffer-start                       buffer-end
+
+Buffering reads data from stream, starting from buffer-start; the ending
+position is buffer-end; if the stream is infinite, buffer-end always
+corresponds to the buffer size, but on a regular file, it can be
+smaller, or even equal to buffer-start. The last buffer-end plus one is
+used as the next buffer-start, in the general case.
+
+Another pair of indices, line-start an line-end, identify the line
+boundaries in the buffer, i.e. the places in the stream when lines begin
+and end according to SEPARATOR. The callback is called on a slice of the
+buffer named VIEW that corresponds to a whole line, when a whole line
+fits in the buffer.
+
+All those indices naturally shift to the right after each line is
+read, until the line no longer fits in the current buffer.  When
+:PARTIALP is T, the line is emitted partially (:PART status) and the
+processing continues at index 0. Otherwise, the content of the line is
+moved back to the beginning of the buffer:
+
+   (before)
+ 
+                                   v line-start                   
+                                   |                              
+                                   ############ LINE ###############
+                                   |                              
+   [-------------------------------x--------------------------------[
+   
+   
+   (after)
+   
+   v line-start                   
+   |                              
+   ############ LINE ################
+   |                              
+   [---------------------------------x------------------------------[
+                                     ^
+                                     buffer-start
+   
+More precisely, when no separator is found in current view (before),
+i.e. when the buffer-end index is at the maximal index, the content of
+the buffer is copied back to zero to leave more room for the next
+characters (after). The new buffer-start is buffer-end shifted to the
+left by the same amout of characters.
+
+PARTIAL LINES: unless you are perfectly sure about how your data is
+organized, line splitting can occur anywhere. This can complicate
+further processing of a line if treated as a string (e.g. regular
+expression matching, etc.). :PART lines are best suited when the
+handler works character by character, as-if by READ-CHAR (but with a
+buffer).
+
+TRUNCATED LINES: while the callback is handling a line, nothing
+prevents it from reading more inputs from the underlying stream. Keep
+in mind that when the callback returns, MAP-LINES-ON-SHARED-BUFFER
+will resume scanning input from wherever the stream is, looking for
+the next SEPARATOR.
